@@ -1,0 +1,936 @@
+---
+title: "\\ Statistical Models"
+author: "\\textbf{Theodor-Horatiu Falat}"
+date: "`February 2024`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    highlight: tango
+    latex_engine: xelatex
+    keep_tex: true
+geometry: margin=1in
+fontsize: 10pt
+lang: en
+header-includes:
+   - \usepackage{sectsty}
+   - \sectionfont{\LARGE}
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+# Load H5 file:
+
+```{r}
+library(rhdf5)
+
+# Opens an h5 file of choice, with the same format, and slices the first 56 microphones 
+# downsampling with every 10 timesteps (decimation). Returns dataframe
+read_h5_mic_file <- function(filename="S2_30_0.h5", downsample_factor=10){
+  read_string = sprintf("../measurements/%s", filename)
+  h5ls(read_string)
+  
+  data <- h5read(read_string, "AcousticData/Measurement") 
+  
+  data_downsampled <- data[seq(1, nrow(data), by = downsample_factor), 1:56]
+  
+  data_downsampled <- as.data.frame(data_downsampled)  # Select the first 56 microphones and 500k observations
+  
+  return(data_downsampled)
+}
+```
+
+# Read cartesian coordinates of microphones
+```{r}
+read_h5_cartesian_file <- function(filename="S0_30_90.h5"){
+  read_string = sprintf("../measurements/%s", filename)
+  
+  data <- as.data.frame(h5read(read_string, "Acquisition/MicrophoneCartesianPosition"))
+  
+  colnames(data) <- c("x", "y", "z")
+  
+  return(data)
+}
+```
+
+# Load the data from a data file (default is "S0_30_90.h5") and choose the downsampling factor (default=10)
+```{r}
+data <- read_h5_mic_file(filename="S0_30_90.h5")
+
+position_cartesian <- read_h5_cartesian_file()
+
+position_cartesian <- position_cartesian[1:56, ]
+```
+
+# Plot cartesian position of the microphone setup
+```{r}
+library(plotly)
+
+# Add microphone labels and maintain the color gradient
+p <- plot_ly(position_cartesian, 
+             x = ~x, y = ~y, z = ~z, 
+             type = 'scatter3d', mode = 'markers',  # Keep markers mode separate
+             marker = list(size = 5, 
+                           color = ~-y,  # Keep color gradient based on height (z)
+                           colorscale = 'Viridis', 
+                           opacity = 0.7)) %>%
+  add_text(x = ~x, y = ~y, z = ~z, 
+           text = ~seq_len(nrow(position_cartesian)),  # Label each microphone
+           textposition = 'top center', 
+           showlegend = FALSE) %>%  # Avoid duplicate legend entries
+  layout(
+    title = "Microphone Positions in 3D Space",
+    scene = list(
+      xaxis = list(title = "X"),
+      yaxis = list(title = "Y"),
+      zaxis = list(title = "Z"),
+      camera = list(eye = list(x = 1.5, y = 1.5, z = 1.5))
+    )
+  )
+
+# Show the plot
+p
+
+```
+# Colour coding mics
+```{r}
+library(viridisLite)  # For viridis color mapping
+
+# Normalize the -y values to [0, 1]
+y_vals <- -position_cartesian$y
+y_norm <- (y_vals - min(y_vals)) / (max(y_vals) - min(y_vals))
+
+# Map normalized values to viridis colors
+mic_colors <- viridisLite::viridis(56)[rank(y_norm)]  # Ensure ranking gives smooth scale
+
+# Create a data frame with mic labels and colors
+mic_color_map <- data.frame(
+  mic_id = seq_len(nrow(position_cartesian)),  # or use your own ID column
+  color = mic_colors
+)
+
+```
+
+
+
+# Plot individual microphones
+```{r}
+library(moments)
+library(tseries)
+
+# Plots the data of a microphone at a specific index from a given dataset
+plot_mic_ts <- function(mic_idx, data) {
+  # Define time as row index
+  time <- seq(0, nrow(data) - 1)
+  
+  # Extract the selected microphone's data
+  mic_data <- data[, mic_idx]
+  
+  # Time Series Plot
+  plot(time, mic_data, type = "l", col = "blue",
+       xlab = "Time (samples)", ylab = "Amplitude",
+       main = sprintf("Microphone %i Time Series", mic_idx))
+  
+  # Histogram
+  hist(mic_data, breaks = 50, col = "lightblue", border = "black",
+       main = sprintf("Histogram of Microphone %i", mic_idx),
+       xlab = "Amplitude", ylab = "Frequency")
+  
+  # Autocorrelogram (ACF)
+  acf(mic_data, lag.max = 200, main = sprintf("Autocorrelogram of Microphone %i", mic_idx))
+  pacf(mic_data, lag.max = 200, main = sprintf("Partial correlogram of Microphone %i", mic_idx))
+
+  # Summary statistics
+  cat(sprintf("\nSummary statistics for Microphone %i:\n", mic_idx))
+  print(summary(mic_data))
+  cat(sprintf("\nStandard Deviation: %f\n", sd(mic_data)))
+  cat(sprintf("Skewness: %f\n", moments::skewness(mic_data)))
+  cat(sprintf("Kurtosis: %f\n", moments::kurtosis(mic_data)))
+
+  adf_test <- adf.test(mic_data)
+  print(adf_test)
+  return(invisible())
+}
+plot_mic_ts(1, data)
+```
+# Closest Microphone
+```{r}
+plot_mic_ts(8, data) 
+```
+# FARTHEST MICROPHONE
+```{r}
+plot_mic_ts(23, data)
+```
+# FAULTY MICROPHONE
+```{r}
+# THE PRESSURE DIFFERENCES IT DETECTS ARE VERY CLOSE TO 0
+plot_mic_ts(50, data)
+```
+# INTERESTING MICROPHONE
+```{r}
+plot_mic_ts(9, data)
+```
+
+
+# Create 3d plot of all microphones at the same time 
+```{r}
+library(rgl)
+
+plot_mic_3D_rgl <- function(data, alpha = 0.7, line_width = 1.5) {
+  # Define x (time index), y (microphone index), and z (amplitude)
+  x <- rep(1:nrow(data), times = ncol(data))  # Time index
+  y <- rep(1:ncol(data), each = nrow(data))   # Microphone index
+  z <- as.vector(as.matrix(data))             # Amplitude values
+
+  # Define alternating colors for each microphone with transparency
+  color_palette <- c("blue", "red", "green", "purple", "orange", "cyan")
+  line_colors <- rep(color_palette, length.out = ncol(data))
+  line_colors <- adjustcolor(line_colors, alpha.f = alpha)  # Add transparency
+
+  # Open an interactive 3D plot window
+  open3d()
+  plot3d(1, 1, 1, type = "n", xlim = c(1, nrow(data)), 
+         ylim = c(1, ncol(data)), zlim = range(data, na.rm = TRUE),  # Adjust zlim for amplitude range
+         xlab = "Time (Index)", ylab = "Microphone", zlab = "Amplitude",
+         main = "3D Multivariate Time Series Plot")
+
+  # Add grid for better reference
+  grid3d(c("x", "y", "z"))
+
+  # Plot each microphone separately to avoid unwanted connections
+  for (i in 1:ncol(data)) {
+    lines3d(1:nrow(data), rep(i, nrow(data)), data[, i], 
+            col = line_colors[i], lwd = line_width)
+  }
+
+}
+
+# Run the function with your downsampled data
+plot_mic_3D_rgl(data, alpha = 0.5, line_width = 1.2)
+
+```
+
+#### FIRST MODEL:
+# Principal Component Analysis
+
+```{r}
+# Convert to numeric data
+mic_time_data <- as.matrix(t(data))
+
+# Apply PCA, center around the mean, and standardize
+pca_result <- prcomp(mic_time_data, center = TRUE, scale. = TRUE)
+
+pca_scores <- pca_result$x
+
+summary(pca_result)
+```
+
+
+### Visualizing PCA 
+#  Scree plot showing variance of each principal component
+```{r}
+library(ggplot2)
+
+# Compute variance explained
+pca_var <- pca_result$sdev^2
+pca_var_exp <- pca_var / sum(pca_var)
+cumulative_var <- cumsum(pca_var_exp)
+
+# Create dataframe for plotting
+pca_df <- data.frame(PC = 1:length(pca_var_exp), 
+                     Variance = pca_var_exp, 
+                     Cumulative = cumulative_var)
+
+# Create the scree plot
+ggplot(pca_df, aes(x = PC)) +
+  geom_bar(aes(y = Variance), stat = "identity", fill = "blue") +
+  geom_line(aes(y = Cumulative), color = "red", size = 1) +
+  geom_point(aes(y = Cumulative), color = "red", size = 2) +  # Add points to cumulative line
+  geom_hline(yintercept = 0.95, linetype = "dashed", color = "black") +  # 95% retained variance line
+  labs(title = "Scree Plot of PCA", 
+       x = "Principal Component", 
+       y = "Proportion of Variance Explained") +
+  theme_minimal()
+
+# Find the number of PCs that retain 95% of the variance
+num_pcs_95 <- which(cumulative_var >= 0.95)[1]
+
+# Store the PCA scores that retain 95% of the variance
+pca_scores_95 <- pca_scores[, 1:num_pcs_95]
+
+# Print the number of components that retain 95% variance
+cat("Number of PCs retaining 95% variance:", num_pcs_95, "\n")
+
+```
+
+# Extract principal components
+```{r}
+library(ggplot2)
+library(reshape2)
+
+# Assuming pca_scores is a matrix or data frame where each column represents a principal component
+# and rows represent the time samples.
+
+# Create a time vector based on the number of rows in the PCA scores
+pca_time <- 1:nrow(pca_scores)
+
+# Select only the first three principal components
+pca_df <- data.frame(Time = pca_time, PC1 = pca_scores[, 1], PC2 = pca_scores[, 2], PC3 = pca_scores[, 3])
+
+# Melt the data for ggplot (to make it long format for easier plotting)
+pca_long <- melt(pca_df, id.vars = "Time", variable.name = "Principal Component", value.name = "Score")
+
+# Plot the first three PCA scores over time using ggplot
+ggplot(pca_long, aes(x = Time, y = Score, color = `Principal Component`)) +
+  geom_line() +
+  labs(title = "First Three PCA Scores Over Time", 
+       x = "Time", 
+       y = "PCA Score") +
+  theme_minimal() +
+  scale_color_manual(values = c("blue", "red", "green"))  # Custom colors for the three components
+
+
+```
+
+# Plot first two components over each other
+```{r}
+library(ggplot2)
+
+# Exclude mic 50 from color map too
+mic_color_map_clean <- mic_color_map[mic_color_map$mic_id != 50, ]
+
+plotting <- as.data.frame(pca_scores[,1:2])
+
+# Exclude row 50
+plotting_clean <- plotting[-50, ]
+
+# Compute Euclidean distance of each microphone from the origin (0,0) in PCA space
+plotting_clean$Distance <- sqrt(plotting_clean[,1]^2 + plotting_clean[,2]^2)
+plotting_clean$Mic <- factor(1:nrow(plotting_clean))  # Microphone labels
+
+# Add mic labels to `plotting_clean`
+plotting_clean$mic_id <- as.integer(as.character(plotting_clean$Mic))
+
+# Merge spatial color info
+plotting_clean <- merge(plotting_clean, mic_color_map_clean, by = "mic_id")
+
+# Create the PCA plot with ggplot2
+ggplot(plotting_clean, aes(x = plotting_clean[,2], y = plotting_clean[,3])) +
+  geom_point(aes(color = color), size = 3) +
+  geom_text(aes(label = Mic), vjust = -1, size = 3) +
+  scale_color_identity() +  # Use predefined colors from the palette
+  theme_minimal() +
+  labs(title = "PCA of Microphone Time Series (Excluding Mic 50)",
+       x = "PC1", y = "PC2") +
+  theme(plot.title = element_text(hjust = 0.5))  # Center title for better readability
+```
+
+# Plotting pairs of PCAs (first 5)
+```{r}
+# Remove mic 50 to match PCA/MDS logic if needed
+pca_subset <- pca_scores[-50, 1:5]         # Keep first 5 PCs, exclude mic 50
+colors_subset <- mic_colors[-50]           # Exclude mic 50's color too
+
+# Custom panel function for colored scatterplots
+panel.colored.points <- function(x, y, ...) {
+  points(x, y, col = colors_subset, pch = 19, ...)
+}
+
+# Create the pairs plot with colored panels
+pairs(pca_subset,
+      panel = panel.colored.points,
+      main = "Pairs Plot of PCA Components (Spatial Colors)")
+
+#biplot(pca_result, choices = 1:2, col = c("gray30", "red"))
+```
+
+# March PCA 
+```{#r}
+library(manipulate)
+library(reshape2)
+
+
+# Function to march along a given component
+march_comp <- function(score, mod, comp = 1) {
+  if (is.null(mod$scale)) mod$scale <- 1
+  mod$scale * (colMeans(mod$x) + score * mod$rotation[, comp])
+}
+
+
+reconstructed_data <- t(mic_time_data) %*% pca_result$x
+time_plot <- nrow(reconstructed_data)
+
+# Dynamic exploration
+library(manipulate)
+manipulate({
+  matplot(time, pca_result$x[, comp], type = "l", lty = 1, xlab = "Time",
+          ylab = "Amplitude", col = "blue", main = paste0("PC", comp))
+  lines(time, march_comp(score = score, mod = pca_result, comp = comp),
+        col = 2, lwd = 2)
+}, score = slider(min = -200, max = 200, step = 10, initial = 0),
+comp = slider(min = 1, max = ncol(pca_result$x), step = 1, initial = 1))
+```
+
+#### SECOND MODEL
+## Multi-Dimensional Scaling (MDS)
+
+# FIRST USING PCA REDUCED DATA
+# CHECKING FOR CORRELATION TO DECIDE ON SIMILARITY METRIC
+
+```{r}
+# Correlation matrix:
+corr_matrix <- cor(pca_scores_95)
+
+library(corrplot)
+
+# Compute the correlation matrix for the first 10 principal components
+pc_corr_matrix <- cor(pca_scores_95)
+
+# Create a correlation plot
+corrplot(pc_corr_matrix, method = "circle", 
+         type = "upper", 
+         tl.col = "black", # Color of text labels
+         tl.cex = 0.8,     # Size of text labels
+         col = colorRampPalette(c("blue", "white", "red"))(200), # Color gradient
+         title = "Correlation Plot of the First 10 Principal Components")
+
+# UNCORRELATED DATASET USING EUCLIDEAN INSTEAD OF MAHALANOBIS
+```
+# MDS WITH PCA
+
+```{#r}
+library(MASS)
+library(proxy)
+
+# Using 95% variance PCAs for MDS analysis
+
+# Compute the Euclidean distance matrix
+distance_matrix_euclidean <- dist(pca_scores_95, method = "euclidean") 
+
+# Apply MDS
+mds_result_euclidean <- isoMDS(distance_matrix_euclidean)
+
+# Plot the MDS results (2D representation)
+plot(mds_result_euclidean$points, type = "n", xlab = "MDS Dimension 1", ylab = "MDS Dimension 2", main = "MDS of Microphones (Euclidean)")
+text(mds_result_euclidean$points, labels = 1:nrow(mic_time_data), col = "blue", cex = 0.7)  # Labels can be the microphone indices
+
+
+
+```
+# REDOING MDS WITH PCA WITHOUT MIC 50 (FAULTY MIC)
+```{r}
+# Using 95% variance PCAs for MDS analysis
+# REMOVING MIC 50
+
+pca_scores_95_clean <- pca_scores_95[-50, ]
+
+library(MASS)
+library(ggplot2)
+
+# Compute Euclidean distance matrix
+distance_matrix_euclidean <- dist(pca_scores_95_clean, method = "euclidean") 
+
+# Apply MDS
+mds_result_euclidean <- isoMDS(distance_matrix_euclidean)
+
+# Extract MDS coordinates
+mds_data <- as.data.frame(mds_result_euclidean$points)
+colnames(mds_data) <- c("Dim1", "Dim2")
+mds_data$mic_id <- setdiff(1:56, 50)  # Microphone IDs excluding mic 50  
+
+# Merge with mic colours
+mds_data <- merge(mds_data, mic_color_map_clean, by = "mic_id")
+
+
+# Create a color gradient from yellow to blue
+#color_palette <- colorRampPalette(c("yellow", "blue"))(nrow(mds_data))
+#mds_data$Color <- color_palette[rank(mds_data$Dim1)]  # Rank by Dim1 for gradient effect
+
+# Plot with ggplot2
+ggplot(mds_data, aes(x = Dim1, y = Dim2)) +
+  geom_point(aes(color = color), size = 3) +
+  geom_text(aes(label = mic_id), vjust = -1, size = 3) +
+  scale_color_identity() +  # Use predefined colors
+  theme_minimal() +
+  labs(title = "MDS of Microphones (Euclidean)",
+       x = "MDS Dimension 1",
+       y = "MDS Dimension 2")+
+    theme(plot.title = element_text(hjust = 0.5))
+
+
+```
+# NOW APPLYING MDS WITH ORIGINAL DATA (DOESN'T WORK)
+```{#r}
+# Correlation matrix:
+corr_matrix <- cor(mic_time_data)
+
+library(corrplot)
+
+# Compute the correlation matrix for the first 10 principal components
+mic_corr_matrix <- cor(mic_time_data)
+
+# Create a correlation plot
+corrplot(mic_corr_matrix[1:10, ], method = "circle", 
+         type = "upper", 
+         tl.col = "black", # Color of text labels
+         tl.cex = 0.8,     # Size of text labels
+         col = colorRampPalette(c("blue", "white", "red"))(200), # Color gradient
+         title = "Correlation Plot of the First 10 microphones")
+```
+
+# t-SNE on raw data
+```{r}
+library(Rtsne)
+library(ggplot2)
+
+# Run t-SNE
+tsne_results <- Rtsne(mic_time_data[-50, ], perplexity = 15, initial_dims = 30, theta = 0.1, dims = 2, pca = TRUE, verbose = TRUE)
+
+# Extract the 2D embeddings
+tsne_data <- data.frame(
+  X = tsne_results$Y[,1],
+  Y = tsne_results$Y[,2],
+  mic_id = setdiff(1:56, 50)  # Label microphones for visualization no mic 50
+)
+
+# Join with the spatial color mapping
+tsne_color_map <- mic_color_map[mic_color_map$mic_id %in% tsne_data$mic_id, ]
+tsne_data <- merge(tsne_data, tsne_color_map, by = "mic_id")
+
+
+# Plot with ggplot2
+ggplot(tsne_data, aes(x = X, y = Y)) +
+  geom_point(aes(color = color), size = 3) +
+  geom_text(aes(label = mic_id), vjust = -1, size = 3) +
+  scale_color_identity() +  # Use predefined colors
+  theme_minimal() +
+  labs(title = "t-SNE Visualization of Microphone Data",
+       x = "t-SNE Dimension 1",
+       y = "t-SNE Dimension 2")
+
+```
+
+# FIT ARMA model to microphone 1
+```{#r}
+library(forecast)
+
+# Convert microphone time series to ts object
+mic_1_series <- ts(mic_time_data[1, ])  # First microphone
+
+# Automatically determine best (p, q)
+best_arma_model <- auto.arima(mic_1_series, d = 0, stepwise = FALSE, approximation = FALSE)
+
+# View selected model
+summary(best_arma_model)
+
+```
+# Plot FItted Values over actual mic data
+```{#r}
+library(ggplot2)
+library(forecast)
+
+
+# Get fitted values
+fitted_values <- fitted(best_arma_model)
+
+# Create a time series plot
+time_index <- 1:length(mic_time_data[1, ])  # Time points
+
+ggplot() +
+  geom_line(aes(x = time_index, y = mic_time_data[1, ]), color = "blue", alpha = 0.5, size = 1) +  # Actual values
+  geom_line(aes(x = time_index, y = fitted_values), color = "red", size = 1) +  # Fitted values
+  labs(title = "ARMA Model Fit for Microphone 1",
+       x = "Time",
+       y = "Amplitude") +
+  theme_minimal()
+
+```
+# Forecast mic 1
+```{#r}
+# Forecast next 200 time points
+forecast_arma <- forecast(best_arma_model, h = 2000)
+
+# Plot the forecast
+autoplot(forecast_arma) +
+  ggtitle("ARMA Forecast for Microphone 1") +
+  xlab("Time") +
+  ylab("Amplitude") +
+  theme_minimal()
+
+```
+# Lag plot trial
+```{#r}
+lag.plot(mic_time_data[1,], lags=1)
+
+```
+
+
+
+# Extend to all mics (takes too long)
+```{#r}
+arma_models <- lapply(1:56, function(i) {
+  series <- ts(mic_time_data[i, ])
+  auto.arima(series, d = 0, stepwise = FALSE, approximation = FALSE)
+})
+
+# Example: View the selected (p, q) for the first microphone
+summary(arma_models[[1]])
+```
+
+# Convert all mics to timeseries data
+```{r}
+tsseries <- lapply(1:56, function(i) {
+  tsseries <- ts(mic_time_data[i, ])
+})
+```
+
+# Check for cointegrations at lag of maximum acf between pais of microphones
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# ======= USER INPUTS =======
+selected_mics <- c(8, 6, 7, 23, 22, 24, 42)
+reference_mic <- 42  # Chosen reference mic
+
+# ======= DATA PREP =======
+mic_time_data_subset <- mic_time_data[selected_mics, ]
+mic_labels <- rownames(mic_time_data)[selected_mics]
+
+# Coordinates and distance from reference
+mic_coords <- position_cartesian[selected_mics, ]
+ref_coords <- position_cartesian[as.character(reference_mic), ]
+ref_coords_vector <- as.numeric(ref_coords)
+
+mic_coords$distance_from_ref <- apply(mic_coords, 1, function(row) {
+  sqrt(sum((as.numeric(row) - ref_coords_vector)^2))
+})
+
+# ======= LAG COMPUTATION =======
+results <- data.frame()
+
+ref_index <- which(selected_mics == reference_mic)
+ref_signal <- mic_time_data_subset[ref_index, ]
+
+for (i in 1:length(selected_mics)) {
+  mic_i <- selected_mics[i]
+  if (mic_i == reference_mic) next  # Skip correlation with itself
+  
+  signal_i <- mic_time_data_subset[i, ]
+  ccf_result <- ccf(signal_i, ref_signal, lag.max = 100, plot = FALSE)
+  best_lag <- ccf_result$lag[which.max(abs(ccf_result$acf))]
+  
+  coords_i <- mic_coords[i, ]
+  
+  results <- rbind(results, data.frame(
+    Mic = mic_labels[i],
+    Lag = best_lag,
+    Distance = round(coords_i$distance_from_ref, 2),
+    Mic_label = paste0(mic_labels[i], "\n(", round(coords_i$distance_from_ref, 2), "m)")
+  ))
+}
+
+# ======= PLOT =======
+ggplot(results, aes(x = reorder(Mic_label, Distance), y = Lag, fill = Lag)) +
+  geom_col(color = "black") +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0,
+                       name = "Lag (samples)") +
+  labs(
+    title = paste("Lag of Max Correlation with Mic", reference_mic),
+    subtitle = "N/A",
+    x = "Microphone (with distance from reference)",
+    y = "Lag (samples)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+# Updated Correlation plot at equal lag, with acf shown in plot
+```{r}
+# ======= LIBRARIES =======
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+# ======= USER INPUTS =======
+selected_mics <- c(8, 6, 7, 23, 22, 24)  # Microphones to include
+reference_mic <- 42              # Microphone to use as reference
+fixed_lag <- 0                 # Lag to extract correlation at
+
+# ======= DATA PREP =======
+# Include the reference mic in the data subset!
+all_mics <- unique(c(selected_mics, reference_mic))
+mic_time_data_subset <- mic_time_data[all_mics, ]
+mic_coords <- position_cartesian[all_mics, ]
+mic_labels <- rownames(mic_time_data)[all_mics]
+
+# Calculate distances from reference mic
+ref_coords_vector <- as.numeric(position_cartesian[as.character(reference_mic), ])
+mic_coords$distance_from_ref <- apply(mic_coords, 1, function(row) {
+  sqrt(sum((as.numeric(row[1:3]) - ref_coords_vector)^2))
+})
+
+# ======= CCF-BASED CORRELATION FUNCTION =======
+get_ccf_at_fixed_lag <- function(x, y, lag, lag.max = 100) {
+  result <- ccf(x, y, lag.max = lag.max, plot = FALSE)
+  lag_index <- which(result$lag == lag)
+  if (length(lag_index) == 0) return(NA)
+  return(result$acf[lag_index])
+}
+
+# ======= COMPUTE PAIRWISE CORRELATIONS =======
+results <- data.frame()
+
+for (i in seq_along(all_mics)) {
+  mic_i <- all_mics[i]
+  mic_i_data <- mic_time_data[mic_i, ]
+  
+  for (j in seq_along(all_mics)) {
+    mic_j <- all_mics[j]
+    mic_j_data <- mic_time_data[mic_j, ]
+    
+    corr_value <- get_ccf_at_fixed_lag(mic_i_data, mic_j_data, fixed_lag)
+    coords_j <- mic_coords[as.character(mic_j), ]
+    
+    results <- rbind(results, data.frame(
+      Mic1 = mic_i,
+      Mic2 = mic_j,
+      Correlation = corr_value,
+      Distance = round(coords_j$distance_from_ref, 2),
+      X = coords_j[1],
+      Y = coords_j[2],
+      Z = coords_j[3]
+    ))
+  }
+}
+
+# ======= Annotated Labels =======
+results$Mic2_label <- paste0(results$Mic2, "\n(", results$Distance, "m)")
+
+# ======= FULL TILE PLOT =======
+ggplot(results, aes(x = as.factor(Mic1), y = Mic2_label, fill = Correlation)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = round(Correlation, 2)), size = 3) +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0.8,
+                       limits = c(0.6, 1),
+                       name = "Correlation") +
+  labs(
+    title = paste("Cross-Correlation at Lag =", fixed_lag),
+    subtitle = paste("Reference Microphone:", reference_mic),
+    x = "Mic i",
+    y = "Mic j (with distance from reference)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# ======= REFERENCE MIC PLOT ONLY =======
+results_filtered <- results %>%
+  filter(Mic1 == reference_mic & Mic2 != reference_mic) %>%
+  arrange(Distance)
+
+ggplot(results_filtered, aes(x = reorder(Mic2_label, Distance), y = Correlation, fill = Correlation)) +
+  geom_col(color = "black") +
+  scale_fill_gradient2(
+    low = "blue", mid = "white", high = "red", midpoint = 0.8,
+    limits = c(0.6, 1),
+    name = "Correlation"
+  ) +
+  labs(
+    title = paste("Correlation with Reference Mic", reference_mic, "at Lag", fixed_lag),
+    x = "Microphone (with distance from reference)",
+    y = "Cross-Correlation"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+# Multivariate Timeseries model
+```{r}
+# Load required packages
+library(vars)
+
+# Combine microphone time series (each row is a mic, so we transpose)
+multivar_data <- t(mic_time_data[-50, 1:1000])  # Now rows = time, columns = mics (remove mic 50)
+
+# Convert to time series object 
+ts_data <- ts(multivar_data)
+
+# Fit VAR model use VARselect to find optimal  lag order
+lag_selection <- VARselect(ts_data, lag.max = 10, type = "const")
+best_lag <- lag_selection$selection["AIC(n)"]
+
+# Fit the VAR model with selected lag
+var_model <- VAR(ts_data, p = best_lag, type = "const")
+
+# Summary(Just don't)
+#summary(var_model)
+
+```
+Generalized Dynamic Principal Components model
+```{r}
+library(gdpc)
+
+gdpc_model <- gdpc(multivar_data, k = 100)  # k = number of lags
+
+
+# Convert to data frame for ggplot
+f_df <- as.data.frame(gdpc_model$f)
+f_df$Time <- 1:nrow(f_df)
+f_long <- melt(f_df, id.vars = "Time", variable.name = "Component", value.name = "Value")
+
+# Plot
+ggplot(f_long, aes(x = Time, y = Value, color = Component)) +
+  geom_line() +
+  labs(title = "Dynamic Principal Components", y = "Value") +
+  theme_minimal()
+```
+
+# Adding regular PCAs for  comparison
+```{r}
+library(ggplot2)
+library(reshape2)
+
+# 1. Subset the data (remove mic 50, first 1000 time steps)
+mic_subset <- mic_time_data[-50, 1:1000]
+
+# 2. Transpose so rows = time, columns = microphones (like GDPC)
+mic_subset_t <- t(mic_subset)
+
+# 3. Perform PCA (center and scale for fair comparison)
+pca_result <- prcomp(mic_subset_t, center = TRUE, scale. = TRUE)
+
+# 4. Get PCA scores (principal components over time)
+pca_scores <- as.data.frame(pca_result$x[, 1:4])  # first 4 PCs to match GDPC
+pca_scores$Time <- 1:nrow(pca_scores)
+
+# 5. Melt PCA scores for ggplot
+pca_long <- melt(pca_scores, id.vars = "Time", variable.name = "Component", value.name = "Value")
+pca_long$Type <- "PCA"
+
+# 6. Melt GDPC scores for ggplot (already limited to 1000 time steps)
+f_df <- as.data.frame(gdpc_model$f)
+f_df$Time <- 1:nrow(f_df)
+gdpc_long <- melt(f_df, id.vars = "Time", variable.name = "Component", value.name = "Value")
+gdpc_long$Type <- "GDPC"
+
+# 7. Combine both
+combined_df <- rbind(pca_long, gdpc_long)
+
+# 8. Plot
+ggplot(combined_df, aes(x = Time, y = Value, color = Component)) +
+  geom_line() +
+  facet_wrap(~Type, ncol = 1, scales = "free_y") +
+  labs(title = "Comparison of GDPC and PCA Components", y = "Component Value") +
+  theme_minimal()
+
+
+# Plot PCA1 separately
+ggplot(pca_scores, aes(x = Time, y = PC1)) +
+  geom_line(color = "steelblue", size = 1) +
+  labs(title = "PCA Component 1 Over Time", y = "PC1 Value", x = "Time") +
+  theme_minimal()
+
+```
+
+
+
+# Independent Component Analysis (ICA)
+```{r}
+library(fastICA)
+
+# Remove the 50th microphone 
+mic_time_data_new <- mic_time_data[-50, 10000:20000]
+
+# Perform ICA
+ica_result <- fastICA(t(mic_time_data_new), n.comp = nrow(mic_time_data_new)) # Adjust the number of components if necessary
+
+# View the independent components
+#print(ica_result$S)
+```
+ICA Components
+```{r}
+par(mfrow = c(3, 3))  # Adjust for how many components you want to view
+for (i in 1:9) {
+  plot(ica_result$S[, i], type = "l", main = paste("ICA Component", i),
+       xlab = "Time", ylab = "Value")
+}
+```
+Heatmap for checking influence 
+```{r}
+library(pheatmap)
+pheatmap(ica_result$A,
+         main = "Mixing Matrix (Microphone Loadings on ICA Components)",
+         cluster_rows = TRUE,
+         cluster_cols = TRUE)
+
+```
+Reconstruction with ICA
+```{r}
+reconstructed <- ica_result$S %*% t(ica_result$A)  # t(A) if A is microphones x components
+reconstructed <- t(reconstructed)  # To match original mic x time format
+
+```
+
+Overlay plot
+```{r}
+library(plotly)
+
+# Choose an ICA component to visualize (e.g., the 1st)
+component_index <- 23
+loadings <- ica_result$A[, component_index]  # vector of loadings for all mics
+
+# Make sure position_cartesian is a data.frame or matrix with 3 columns: X, Y, Z
+# Also remove mic 50, to match ica_result$A (which was based on mic_time_data[-50, ])
+position_cartesian_filtered <- position_cartesian[-50, ]
+
+# Create interactive 3D scatter plot
+plot_ly(
+  x = position_cartesian_filtered[,1],
+  y = position_cartesian_filtered[,2],
+  z = position_cartesian_filtered[,3],
+  type = "scatter3d",
+  mode = "markers+text",
+  marker = list(
+    size = 6,
+    color = loadings,
+    colorscale = "RdBu",
+    colorbar = list(title = "ICA Loading"),
+    reversescale = TRUE
+  ),
+  text = as.character(rownames(position_cartesian_filtered)),
+  hoverinfo = "text"
+) %>%
+  layout(
+    scene = list(
+      xaxis = list(title = "X"),
+      yaxis = list(title = "Y"),
+      zaxis = list(title = "Z")
+    ),
+    title = paste("ICA Component", component_index, "Loadings on Microphone Layout")
+  )
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
